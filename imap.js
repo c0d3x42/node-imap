@@ -266,6 +266,12 @@ ImapConnection.prototype.connect = function(loginCb) {
           self._resetBox();
         }
       }
+      if( data[2] === 'NOOP completed.' )
+      {
+        debug( "NOOP has completed - skipping" );
+        return;
+      }
+
 
       if (self._state.requests[0].command.indexOf('RENAME') > -1) {
         self._state.box.name = self._state.box._newName;
