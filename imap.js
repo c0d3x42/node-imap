@@ -28,7 +28,7 @@ function ImapConnection (options) {
     curData: '',
     curExpected: 0,
     capabilities: [],
-    box: { _uidnext: 0, _flags: [], _newKeywords: false, validity: 0, keywords: [], permFlags: [], name: null, messages: { total: 0, new: 0 }}
+    box: { _uidnext: 0, _flags: [], _newKeywords: false, validity: 0, keywords: [], permFlags: [], name: null, messages: { total: 0, 'new': 0 }}
   };
   this._options = extend(true, this._options, options);
 
@@ -91,13 +91,22 @@ ImapConnection.prototype.connect = function(loginCb) {
     var literalData = '';
     debug('RECEIVED: ' + data);
 
+    /*
+     * check data read from socket to see if it does *not* have a CRLF in it
+     */
     if (data.indexOf(CRLF) === -1) {
+      debug( "onData NO CRLF" );
+      
       if (self._state.curData)
         self._state.curData += data;
       else
         self._state.curData = data;
-      return;
+
+      // check again to ensure if we now have a CRLF in the previous data + new data
+      if( self._state.curData.indexOf(CRLF) === -1)
+        return;
     }
+
     if (self._state.curData)
       data = self._state.curData + data;
     self._state.curData = undefined;
@@ -122,12 +131,21 @@ ImapConnection.prototype.connect = function(loginCb) {
       }
     }
 
+    var has_trailing_crlf = false;
+    if( data.match( /\r\n$/ ) )
+      has_trailing_crlf = true;
+
     data = data.split(CRLF).filter(isNotEmpty);
 
     // Defer any extra server responses found in the incoming data
     if (data.length > 1) {
-      data.slice(1).forEach(function(line) {
-        process.nextTick(function() { self._state.conn.emit('data', line + CRLF); });
+      data.slice(1).forEach(function(line, line_index) {
+        process.nextTick(function() { 
+          if( has_trailing_crlf == false )
+            self._state.conn.emit('data', line ); 
+          else
+            self._state.conn.emit('data', line + CRLF); 
+        });
       });
     }
 
@@ -159,7 +177,8 @@ ImapConnection.prototype.connect = function(loginCb) {
         break;
         case 'FLAGS':
           if (self._state.status === STATES.BOXSELECTING)
-            self._state.box._flags = data[2].substr(1, data[2].length-2).split(' ').map(function(flag) {return flag.substr(1);});;
+            self._state.box._flags = data[2].substr(1, data[2].length-2).split(' ').map(function(flag) {return flag.substr(1);});
+          break;
         case 'OK':
           if ((result = /^\[ALERT\] (.*)$/i.exec(data[2])) !== null)
             self.emit('alert', result[1]);
@@ -194,29 +213,28 @@ ImapConnection.prototype.connect = function(loginCb) {
           self._state.requests[0].args.push(parseInt(result[1]));
         break;*/
         case 'LIST':
-          var result;
-          if (self.delim === null && (result = /^\(\\Noselect\) (.+?) ".*"$/.exec(data[2])) !== null)
-            self.delim = (result[1] === 'NIL' ? false : result[1].substring(1, result[1].length-1));
+          var result2;
+          if (self.delim === null && (result2 = /^\(\\Noselect\) (.+?) ".*"$/.exec(data[2])) !== null)
+            self.delim = (result2[1] === 'NIL' ? false : result2[1].substring(1, result2[1].length-1));
           else if (self.delim !== null) {
             if (self._state.requests[0].args.length === 0)
               self._state.requests[0].args.push({});
-            result = /^\((.*)\) (.+?) "(.+)"$/.exec(data[2]);
+            result2 = /^\((.*)\) (.+?) "(.+)"$/.exec(data[2]);
             var box = {
-              attribs: result[1].split(' ').map(function(attrib) {return attrib.substr(1).toUpperCase();})
-                                .filter(function(attrib) {return BOX_ATTRIBS.indexOf(attrib) > -1;}),
-              delim: (result[2] === 'NIL' ? false : result[2].substring(1, result[2].length-1)),
+              attribs: result2[1].split(' ').map(function(attrib) {return attrib.substr(1).toUpperCase();}).filter(function(attrib) {return BOX_ATTRIBS.indexOf(attrib) > -1;}),
+              delim: (result2[2] === 'NIL' ? false : result2[2].substring(1, result2[2].length-1)),
               children: null,
               parent: null
-            }, name = result[3], curChildren = self._state.requests[0].args[0];
+            }, name = result2[3], curChildren = self._state.requests[0].args[0];
 
             if (box.delim) {
               var path = name.split(box.delim).filter(isNotEmpty), parent = null;
               name = path.pop();
-              for (var i=0,len=path.length; i<len; i++) {
-                if (!curChildren[path[i]].children)
-                  curChildren[path[i]].children = {};
-                parent = curChildren[path[i]];
-                curChildren = curChildren[path[i]].children;
+              for (var j=0,len=path.length; j<len; j++) {
+                if (!curChildren[path[j]].children)
+                  curChildren[path[j]].children = {};
+                parent = curChildren[path[j]];
+                curChildren = curChildren[path[j]].children;
               }
               box.parent = parent;
             }
@@ -230,7 +248,7 @@ ImapConnection.prototype.connect = function(loginCb) {
                 self._state.box.messages.total = parseInt(data[1]);
               break;
               case 'RECENT': // messages marked with the \Recent flag (i.e. new messages)
-                self._state.box.messages.new = parseInt(data[1]);
+                self._state.box.messages['new'] = parseInt(data[1]);
                 if (self._state.status !== STATES.BOXSELECTING)
                   self.emit('mail', self._state.box.messages.new); // new mail notification
               break;
@@ -447,7 +465,9 @@ ImapConnection.prototype.fetch = function(uids, options, cb) {
       options.request.body = options.request.body[0];
     }
     if (typeof options.request.headers === 'boolean' && options.request.headers === true)
+    {
       toFetch = 'HEADER'; // fetches headers only
+    }
     else if (typeof options.request.body === 'boolean' && options.request.body === true)
       toFetch = 'TEXT'; // fetches the whole entire message text (minus the headers), including all message parts
     else if (typeof options.request.body === 'string') {
@@ -456,7 +476,10 @@ ImapConnection.prototype.fetch = function(uids, options, cb) {
       toFetch = options.request.body; // specific message part identifier, e.g. '1', '2', '1.1', '1.2', etc
     }
   } else
+  {
     toFetch = 'HEADER.FIELDS (' + options.request.headers.join(' ').toUpperCase() + ')'; // fetch specific headers only
+  }
+
 
   this._send('UID FETCH ' + uids.join(',') + ' (FLAGS INTERNALDATE'
             + (options.request.struct ? ' BODYSTRUCTURE' : '')
